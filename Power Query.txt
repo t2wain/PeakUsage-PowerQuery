@@ -1,0 +1,67 @@
+AppUsageSessions
+=================
+
+let
+    Source = Csv.Document(File.Contents("C:\devgit\AppUsage\Data\AppUsageSessions.csv"),[Delimiter=",", Columns=5, Encoding=65001, QuoteStyle=QuoteStyle.None]),
+    #"Promoted Headers" = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+    #"Changed Type" = Table.TransformColumnTypes(#"Promoted Headers",{{"UsageLogId", Int64.Type}, {"SoftwareName", type text}, {"LicenseServerName", type text}, {"FromDate", type datetime}, {"ToDate", type datetime}}),
+    fnAvailLic = (LicName as text) => if Text.Contains(LicName, "SERVER02") then 3 else 4,
+    fnMin = (Num1 as number, Num2 as number) as number => if Num1 < Num2 then Num1 else Num2,
+    StepDuration = #duration(0,0,1,0),
+    #"Add column" = Table.AddColumn(#"Changed Type", "DateStep", each List.DateTimes([FromDate], ([ToDate] - [FromDate]) / StepDuration, StepDuration), type {datetime}),
+    #"Expanded DateRange" = Table.ExpandListColumn(#"Add column", "DateStep"),
+    #"Add Daily" = Table.AddColumn(#"Expanded DateRange", "Daily", each [DateStep] - #duration(0,Time.Hour([DateStep]),Time.Minute([DateStep]),Time.Second([DateStep])), type datetime),
+    #"Add Hourly" = Table.AddColumn(#"Add Daily", "Hourly", each [DateStep] - #duration(0,0,Time.Minute([DateStep]),Time.Second([DateStep])), type datetime),
+    #"Add PerMinute" = Table.AddColumn(#"Add Hourly", "PerMinute", each [DateStep] - #duration(0,0,0,Time.Second([DateStep])), type date),
+    #"Removed Columns" = Table.RemoveColumns(#"Add PerMinute",{"UsageLogId", "FromDate", "ToDate", "DateStep"}),
+    #"Grouped PerMinute" = Table.Group(#"Removed Columns", {"SoftwareName","LicenseServerName", "Daily", "Hourly", "PerMinute"}, 
+        {{"PeakLicense", each fnMin(fnAvailLic([LicenseServerName]{0}), Table.RowCount(_)) , Int64.Type},
+        {"AvailLic", each fnAvailLic([LicenseServerName]{0}) , Int64.Type}})
+in
+    #"Grouped PerMinute"
+
+
+	
+PeakPerMinute
+=============
+
+let
+    Source = AppUsageSessions,
+    MinuteUsage = Table.Group(Source, {"SoftwareName","Daily","Hourly","PerMinute"}, 
+        {{"Peak", each List.Sum([PeakLicense]), Int64.Type},
+         {"AvailLic", each List.Sum([AvailLic]), Int64.Type},
+         {"ServerCount", each Table.RowCount(_), Int64.Type}
+        }),
+    AddIsPeak = Table.AddColumn(MinuteUsage, "IsPeak", each if [Peak] = [AvailLic] and [ServerCount] = 3 then true else false, type logical)
+in
+    AddIsPeak
+
+
+	
+PeakPerHourly
+=============
+
+let
+    Source = PeakPerMinute,
+    HourlyPeak = Table.Group(Source, {"SoftwareName","Daily","Hourly","ServerCount","AvailLic"},
+        {{"IsPeak", each List.Max([IsPeak]), type logical},
+         {"Peak", each List.Max([Peak]), Int64.Type},
+         {"PeakDuration", each Table.RowCount(Table.SelectRows(_, each [IsPeak] = true)), Int64.Type}
+        })
+in
+    HourlyPeak
+
+
+	
+PeakPerDaily
+============
+
+let
+    Source = PeakPerHourly,
+    DailyPeak = Table.Group(Source, {"SoftwareName","Daily","ServerCount","AvailLic"},
+        {{"IsPeak", each List.Max([IsPeak])},
+         {"Peak", each List.Max([Peak])},
+         {"PeakDuration", each List.Sum([PeakDuration]), Int64.Type}
+        })
+in
+    DailyPeak
